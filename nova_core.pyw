@@ -42,7 +42,11 @@ from notification_utils import show_toast
 
 load_dotenv()
 
-pygame.mixer.init()
+try:
+    if not pygame.mixer.get_init():
+        pygame.mixer.init()
+except Exception as e:
+    print(f"AUDIO ERROR: {e}")
 
 try:
     offline_engine = pyttsx3.init()
@@ -50,7 +54,8 @@ try:
     if len(voices) > 1:
         offline_engine.setProperty('voice', voices[1].id) 
     offline_engine.setProperty('rate', 190)
-except Exception:
+except Exception as e:
+    print(f"AUDIO ERROR: pyttsx3 init failed: {e}")
     offline_engine = None
 
 api_key = os.getenv("GEMINI_API_KEY")
@@ -104,100 +109,240 @@ def clean_search_query(text):
         
     return cleaned
 
+def get_safe_microphone():
+    """Safely initialize an sr.Microphone() without throwing index errors or hanging.
+
+    Works smoothly with PyAudioWPatch by validating the default input device
+    or enumerating devices to locate a valid input channel if the default is
+    missing or improperly mapped on Windows.
+    """
+    try:
+        return sr.Microphone()
+    except Exception as e:
+        print(f"AUDIO ERROR: {e}")
+
+    try:
+        return sr.Microphone(device_index=None)
+    except Exception as e:
+        print(f"AUDIO ERROR: {e}")
+
+    try:
+        import pyaudio
+        p = pyaudio.PyAudio()
+        try:
+            device_count = p.get_device_count()
+            for idx in range(device_count):
+                try:
+                    info = p.get_device_info_by_index(idx)
+                    if info.get('maxInputChannels', 0) > 0:
+                        return sr.Microphone(device_index=idx)
+                except Exception:
+                    continue
+        finally:
+            p.terminate()
+    except Exception as e:
+        print(f"AUDIO ERROR: {e}")
+
+    return None
+
 def interrupt_callback(recognizer, audio):
+    """Background speech-interrupt listener — runs on a daemon thread managed
+    by listen_in_background; must never block or raise into the caller."""
     global is_speaking_interrupted
     try:
-        query = recognizer.recognize_google(audio, language='en-in').lower()
+        try:
+            query = recognizer.recognize_google(audio, language='hi-IN').lower()
+        except Exception:
+            query = recognizer.recognize_google(audio, language='en-IN').lower()
         if 'stop' in query or 'quiet' in query or 'shut up' in query:
             is_speaking_interrupted = True
-            pygame.mixer.music.stop()
+            try:
+                pygame.mixer.music.stop()
+            except Exception:
+                pass
     except Exception:
         pass
 
 def search_interrupt_callback(recognizer, audio):
     global is_search_interrupted
     try:
-        query = recognizer.recognize_google(audio, language='en-in').lower()
+        try:
+            query = recognizer.recognize_google(audio, language='hi-IN').lower()
+        except Exception:
+            query = recognizer.recognize_google(audio, language='en-IN').lower()
         if 'stop' in query or 'cancel' in query or 'abort' in query:
             is_search_interrupted = True
     except Exception:
         pass
 
-async def generate_voice(text, filename="voice.mp3", voice="en-IN-NeerjaNeural"): 
+async def _generate_voice_async(text, filename, voice="en-IN-NeerjaNeural"):
+    """Async helper: synthesise *text* to *filename* via edge-tts.
+
+    Default voice: en-IN-NeerjaNeural — natural Indian English neural voice profile
+    for pristine, crystal-clear pronunciation of both English and Hindi vocabulary.
+    """
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(filename)
 
-def speak(audio, instant=False, save=True):
-    global last_spoken_text, is_speaking_interrupted
-    is_speaking_interrupted = False
-    
-    if save:
-        last_spoken_text = audio
+# Public alias — keeps any external callers that reference generate_voice() working.
+async def generate_voice(text, filename="voice.mp3", voice="en-IN-NeerjaNeural"):
+    """Synthesise *text* to *filename* via edge-tts (public alias)."""
+    await _generate_voice_async(text, filename, voice)
 
-    print(f"NOVA: {audio}") 
-    
-    if instant and offline_engine:
-        offline_engine.say(audio)
-        offline_engine.runAndWait()
-        return
+# Reusable Clock — avoids allocating a new object on every poll tick.
+_POLL_CLOCK = pygame.time.Clock()
 
+def _safe_remove(path, retries=8, delay=0.1):
+    """Delete *path*, retrying up to *retries* times to tolerate Windows handle-flush lag."""
+    for _ in range(retries):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+            return
+        except OSError:
+            time.sleep(delay)
+
+def _safe_mixer_unload():
+    """Stop playback and fully release pygame's file handle.
+
+    Calls stop() before unload() (required by pygame-ce) then yields
+    60 ms so the Windows kernel flushes the OS-level handle before any
+    subsequent os.remove() attempt.
+    """
     try:
-        r_int = sr.Recognizer()
-        m_int = sr.Microphone()
-        stop_listening = r_int.listen_in_background(m_int, interrupt_callback, phrase_time_limit=2)
-        
-        chunks = re.split(r'(?<=[.!?\n])\s+', audio)
-        chunks = [c.strip() for c in chunks if c.strip()]
-        if not chunks: 
-            chunks = [audio]
+        if pygame.mixer.get_init():
+            pygame.mixer.music.stop()
+    except Exception as e:
+        print(f"AUDIO ERROR: {e}")
+    try:
+        if pygame.mixer.get_init():
+            pygame.mixer.music.unload()
+    except Exception as e:
+        print(f"AUDIO ERROR: {e}")
+    time.sleep(0.06)  # Let Windows flush the OS file handle.
 
-        if os.path.exists("voice_0.mp3"):
-            try: 
-                os.remove("voice_0.mp3")
-            except Exception: 
-                pass
-        
-        asyncio.run(generate_voice(chunks[0], "voice_0.mp3"))
+def _safe_mixer_load(path, retries=10, delay=0.1):
+    """Unload the current track then load *path*, retrying on Windows lock errors."""
+    _safe_mixer_unload()
+    for _ in range(retries):
+        try:
+            if not pygame.mixer.get_init():
+                try:
+                    pygame.mixer.init()
+                except Exception as e:
+                    print(f"AUDIO ERROR: {e}")
+            pygame.mixer.music.load(path)
+            return True
+        except Exception as e2:
+            print(f"AUDIO LOAD ERROR: {e2}")
+            time.sleep(delay)
+    return False
 
-        for index in range(len(chunks)):
-            if is_speaking_interrupted: 
-                break
-                
-            current_filename = f"voice_{index % 2}.mp3"
-            next_filename = f"voice_{(index + 1) % 2}.mp3"
-            
-            pygame.mixer.music.load(current_filename)
+def speak(audio, instant=False, save=True):
+    """Synthesise and play *audio* through edge-tts + pygame-ce.
+
+    Architecture — single timestamped file, zero-race, zero extra threads:
+    ───────────────────────────────────────────────────────────────────────
+    1. Explicitly ensure pygame.mixer.init() is called/verified.
+    2. Write the ENTIRE text to a uniquely named, millisecond-timestamped
+       MP3 on the main thread via asyncio.run() with 'en-IN-NeerjaNeural'.
+    3. Load into pygame.mixer.music (stop -> unload -> load, with retries).
+    4. Start playback.
+    5. Poll get_busy() at 20 Hz, honouring Escape-key and voice-interrupt.
+    6. Guaranteed cleanup in finally: stop() -> unload() -> os.remove().
+
+    Fallback chain:  edge-tts / pygame  ->  pyttsx3 offline engine.
+    """
+    try:
+        global last_spoken_text, is_speaking_interrupted
+        is_speaking_interrupted = False
+
+        if save:
+            last_spoken_text = audio
+
+        print(f"NOVA: {audio}")
+
+        # Explicitly ensure pygame.mixer is initialized
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+        except Exception as e:
+            print(f"AUDIO ERROR: {e}")
+
+        # ── Fast-path: offline TTS for instant/fallback utterances ───────────────
+        if instant and offline_engine:
+            try:
+                offline_engine.say(audio)
+                offline_engine.runAndWait()
+            except Exception as e:
+                print(f"AUDIO ERROR: {e}")
+            return
+
+        # ── Background mic listener (daemon thread via SpeechRecognition) ────────
+        stop_listening = None
+        try:
+            r_int = sr.Recognizer()
+            r_int.dynamic_energy_threshold = True
+            m_int = get_safe_microphone()
+            if m_int:
+                stop_listening = r_int.listen_in_background(
+                    m_int, interrupt_callback, phrase_time_limit=2
+                )
+        except Exception as e:
+            print(f"AUDIO ERROR: {e}")
+            stop_listening = None
+
+        # Millisecond timestamp guarantees a unique path on every call.
+        tmp_path = f"nova_speech_{int(time.time() * 1000)}.mp3"
+
+        try:
+            # ── Step 1: synthesise entire utterance with en-IN-NeerjaNeural voice
+            asyncio.run(_generate_voice_async(audio, tmp_path, voice="en-IN-NeerjaNeural"))
+
+            # ── Step 2: load into mixer (stop + unload + retry handles lock lag) ──
+            if not _safe_mixer_load(tmp_path):
+                raise RuntimeError(f"pygame could not load {tmp_path} after all retries.")
+
+            # ── Step 3: begin playback ────────────────────────────────────────────
             pygame.mixer.music.play()
-            
-            download_thread = None
-            if index + 1 < len(chunks):
-                if os.path.exists(next_filename):
-                    try: 
-                        os.remove(next_filename)
-                    except Exception: 
-                        pass
-                def fetch_next(): 
-                    asyncio.run(generate_voice(chunks[index + 1], next_filename))
-                download_thread = threading.Thread(target=fetch_next)
-                download_thread.start()
-            
+
+            # ── Step 4: poll until track ends naturally or an interrupt fires ─────
             while pygame.mixer.music.get_busy():
+                # Hard interrupt: Escape key physically held down.
                 if ctypes.windll.user32.GetAsyncKeyState(0x1B) & 0x8000:
                     pygame.mixer.music.stop()
                     is_speaking_interrupted = True
                     break
-                pygame.time.Clock().tick(10)
-                
-            pygame.mixer.music.unload()
-            if download_thread: 
-                download_thread.join()
+                # Soft interrupt: voice command set by interrupt_callback().
+                if is_speaking_interrupted:
+                    pygame.mixer.music.stop()
+                    break
+                # 20 Hz poll — responsive yet negligible CPU cost.
+                _POLL_CLOCK.tick(20)
 
-        stop_listening(wait_for_stop=False)
-        time.sleep(0.1) 
-    except Exception:
-        if offline_engine:
-            offline_engine.say(audio)
-            offline_engine.runAndWait()
+        except Exception as e:
+            print(f"AUDIO ERROR: {e}")
+            # ── Fallback: pyttsx3 offline engine for the whole utterance ─────────
+            if offline_engine:
+                try:
+                    offline_engine.say(audio)
+                    offline_engine.runAndWait()
+                except Exception as off_e:
+                    print(f"AUDIO ERROR: {off_e}")
+
+        finally:
+            # ── Step 5: guaranteed cleanup — release handle then delete file ──────
+            _safe_mixer_unload()
+            _safe_remove(tmp_path)
+
+            if stop_listening is not None:
+                try:
+                    stop_listening(wait_for_stop=False)
+                except Exception as e:
+                    print(f"AUDIO ERROR: {e}")
+
+    except Exception as e:
+        print(f"AUDIO ERROR: {e}")
 
 reminder_engine.set_speech_callback(speak)
 reminder_engine.start()
@@ -213,28 +358,158 @@ def wishMe():
     speak("Systems online. Smart home and alert daemons active. How can I assist you today?")
 
 def takeCommand():
-    r = sr.Recognizer()
-    with sr.Microphone() as source:
+    try:
+        r = sr.Recognizer()
+        r.dynamic_energy_threshold = True
         r.pause_threshold = 0.5 
+
+        # Bulletproof PyAudio / Microphone initialization
+        mic = None
         try:
-            audio = r.listen(source, timeout=5, phrase_time_limit=15)
-            query = r.recognize_google(audio, language='en-in')
-            return query.lower()
-        except Exception:
+            mic = sr.Microphone()
+        except Exception as e:
+            print(f"AUDIO ERROR: {e}")
+            try:
+                mic = sr.Microphone(device_index=None)
+            except Exception as e2:
+                print(f"AUDIO ERROR: {e2}")
+                mic = get_safe_microphone()
+
+        if mic is None:
+            mic = get_safe_microphone()
+
+        if mic is None:
+            print("AUDIO ERROR: No valid microphone detected.")
             return "none"
 
-def listen_for_wake_word():
-    r = sr.Recognizer()
-    with sr.Microphone() as source:
-        r.pause_threshold = 0.5
+        # Catch device busy states without hanging
+        audio = None
         try:
-            audio = r.listen(source, timeout=5, phrase_time_limit=3)
-            query = r.recognize_google(audio, language='en-in').lower()
-            if "nova" in query or "no va" in query or "know va" in query: 
-                return True
-        except Exception: 
+            with mic as source:
+                r.adjust_for_ambient_noise(source, duration=0.2)
+                audio = r.listen(source, timeout=5, phrase_time_limit=15)
+        except sr.WaitTimeoutError:
+            return "none"
+        except (OSError, IOError, Exception) as e:
+            print(f"AUDIO ERROR: {e}")
+            if getattr(mic, 'device_index', None) is not None:
+                try:
+                    fallback_mic = sr.Microphone(device_index=None)
+                    with fallback_mic as source:
+                        r.adjust_for_ambient_noise(source, duration=0.2)
+                        audio = r.listen(source, timeout=5, phrase_time_limit=15)
+                except sr.WaitTimeoutError:
+                    return "none"
+                except Exception as fb_err:
+                    print(f"AUDIO ERROR: {fb_err}")
+                    return "none"
+            else:
+                return "none"
+
+        if audio is None:
+            return "none"
+
+        # Explicit recognition language 'hi-IN' with English ('en-IN') fallback
+        query = None
+        try:
+            query = r.recognize_google(audio, language='hi-IN')
+        except sr.UnknownValueError:
             pass
-    return False
+        except Exception as e:
+            print(f"AUDIO ERROR: {e}")
+
+        if not query:
+            try:
+                query = r.recognize_google(audio, language='en-IN')
+            except sr.UnknownValueError:
+                pass
+            except Exception as e:
+                print(f"AUDIO ERROR: {e}")
+                return "none"
+
+        if not query:
+            return "none"
+
+        return query.lower().strip()
+
+    except Exception as e:
+        print(f"AUDIO ERROR: {e}")
+        return "none"
+
+def listen_for_wake_word():
+    try:
+        r = sr.Recognizer()
+        r.dynamic_energy_threshold = True
+        r.pause_threshold = 0.5
+
+        mic = None
+        try:
+            mic = sr.Microphone()
+        except Exception as e:
+            print(f"AUDIO ERROR: {e}")
+            try:
+                mic = sr.Microphone(device_index=None)
+            except Exception as e2:
+                print(f"AUDIO ERROR: {e2}")
+                mic = get_safe_microphone()
+
+        if mic is None:
+            mic = get_safe_microphone()
+
+        if mic is None:
+            time.sleep(0.3)
+            return False
+
+        audio = None
+        try:
+            with mic as source:
+                r.adjust_for_ambient_noise(source, duration=0.2)
+                audio = r.listen(source, timeout=5, phrase_time_limit=3)
+        except sr.WaitTimeoutError:
+            return False
+        except (OSError, IOError, Exception) as e:
+            print(f"AUDIO ERROR: {e}")
+            time.sleep(0.3)
+            return False
+
+        if audio is None:
+            return False
+
+        query = None
+        try:
+            query = r.recognize_google(audio, language='hi-IN').lower()
+        except sr.UnknownValueError:
+            pass
+        except Exception as e:
+            print(f"AUDIO ERROR: {e}")
+
+        if not query:
+            try:
+                query = r.recognize_google(audio, language='en-IN').lower()
+            except sr.UnknownValueError:
+                pass
+            except Exception as e:
+                print(f"AUDIO ERROR: {e}")
+                return False
+
+        if query:
+            clean_q = re.sub(r'[^\w\s]', '', query).strip().lower()
+            if any(phrase in clean_q for phrase in ["goodbye nova", "good bye nova", "bye nova", "shutdown nova", "shut down nova"]):
+                print("\n[*] Immediate Wake-Word Shutdown Triggered.")
+                try:
+                    speak("Shutting down completely. Goodbye, Boss.")
+                except Exception as e:
+                    print(f"AUDIO ERROR: {e}")
+                os._exit(0)
+
+            if "nova" in clean_q or "no va" in clean_q or "know va" in clean_q: 
+                return True
+
+        return False
+
+    except Exception as e:
+        print(f"AUDIO ERROR: {e}")
+        return False
 
 def capture_photo():
     speak("Accessing camera for preview...", save=False)
@@ -311,8 +586,12 @@ def advanced_file_manager(item_name, action="open", constraints=None, is_file_ta
         
     try:
         r_search = sr.Recognizer()
-        m_search = sr.Microphone()
-        stop_search_listening = r_search.listen_in_background(m_search, search_interrupt_callback, phrase_time_limit=2)
+        r_search.dynamic_energy_threshold = True
+        m_search = get_safe_microphone()
+        if m_search:
+            stop_search_listening = r_search.listen_in_background(m_search, search_interrupt_callback, phrase_time_limit=2)
+        else:
+            stop_search_listening = lambda wait_for_stop: None
     except Exception:
         stop_search_listening = lambda wait_for_stop: None
         
@@ -461,9 +740,15 @@ def alarm_checker(alarm_time):
 if __name__ == "__main__":
     wishMe()
     
-    r = sr.Recognizer()
-    with sr.Microphone() as source:
-        r.adjust_for_ambient_noise(source, duration=1)
+    try:
+        r = sr.Recognizer()
+        r.dynamic_energy_threshold = True
+        mic = get_safe_microphone()
+        if mic:
+            with mic as source:
+                r.adjust_for_ambient_noise(source, duration=0.2)
+    except Exception as e:
+        print(f"AUDIO ERROR: {e}")
     
     while True:
         is_awake = listen_for_wake_word()
@@ -487,13 +772,11 @@ if __name__ == "__main__":
                     continue
                 
                 idle_counter = 0
+                raw_query = query.lower().strip()
+                clean_raw = re.sub(r'[^\w\s]', '', raw_query).strip()
                 query = re.sub(r'\bnova\b', '', query).strip()
-                if not query: 
-                    continue
-
-                if skill_router.is_session_active():
-                    response_text, session_ended = skill_router.process_turn(query)
-                    speak(response_text)
+                clean_query = re.sub(r'[^\w\s]', '', query).strip().lower()
+                if not query and not raw_query: 
                     continue
 
                 stop_phrases = ['stop', 'stop recording', 'stop video', 'stop screen record', 'stop recording my screen', 'stop now']
@@ -507,11 +790,52 @@ if __name__ == "__main__":
                             speak("Screen recording terminated and saved.", save=False)
                         continue 
 
-                if query in ['quit', 'exit', 'bye', 'good bye', 'goodbye', 'stop nova', 'good bye nova', 'goodbye nova', 'bye nova', 'shut down your core']:
+                # --- Absolute Termination & Shutdown Protocol ---
+                # Catches all spoken exit variants (exact & substring) across both
+                # normalized and raw queries to guarantee instant termination.
+                _EXIT_EXACT = {
+                    'quit', 'exit', 'bye', 'good bye', 'goodbye',
+                    'stop nova', 'good bye nova', 'goodbye nova',
+                    'bye nova', 'shut down your core', 'shutdown your core',
+                    'shut down nova', 'shutdown nova', 'power down nova',
+                    'exit nova', 'quit nova', 'terminate nova', 'kill yourself',
+                    'shut down', 'shutdown', 'deactivate'
+                }
+                _EXIT_PHRASES = [
+                    'goodbye nova', 'bye nova', 'good bye nova',
+                    'shut down your core', 'shutdown your core',
+                    'shut down nova', 'shutdown nova',
+                    'power down nova', 'exit nova', 'quit nova',
+                    'terminate nova', 'kill yourself', 'shutdown', 'shut down',
+                    'deactivate nova', 'exit', 'quit', 'goodbye'
+                ]
+                _is_exit_command = (
+                    raw_query in _EXIT_EXACT
+                    or query in _EXIT_EXACT
+                    or clean_raw in _EXIT_EXACT
+                    or clean_query in _EXIT_EXACT
+                    or any(phrase in raw_query for phrase in _EXIT_PHRASES)
+                    or any(phrase in query for phrase in _EXIT_PHRASES)
+                    or any(phrase in clean_raw for phrase in _EXIT_PHRASES)
+                    or any(phrase in clean_query for phrase in _EXIT_PHRASES)
+                    or "goodbye nova" in clean_raw
+                    or "exit" in clean_raw.split()
+                    or "quit" in clean_raw.split()
+                    or clean_raw in ("exit", "quit", "goodbye")
+                    or clean_query in ("exit", "quit", "goodbye")
+                )
+
+                if _is_exit_command:
+                    # Immediately halt any active media captures.
                     is_video_recording = False
                     is_screen_recording = False
-                    reminder_engine.stop()
-                    
+
+                    # Gracefully stop the reminder daemon before hard-exit.
+                    try:
+                        reminder_engine.stop()
+                    except Exception:
+                        pass
+
                     print("\n" + "="*45)
                     print("         N.O.V.A. SHUTDOWN PROTOCOL         ")
                     print("="*45)
@@ -519,11 +843,22 @@ if __name__ == "__main__":
                     print("[*] Stopping scheduler and reminder daemon...")
                     print("[*] Securing system memory buffers...")
                     print("[*] Releasing API connection to Neural Core...")
-                    print("[+] Shutdown sequence complete.")
+                    print("[+] Shutdown sequence complete. Kill-switch engaged.")
                     print("="*45 + "\n")
-                    
-                    speak("Shutting down completely. Goodbye, Boss.")
+
+                    try:
+                        speak("Shutting down completely. Goodbye, Boss.")
+                    except Exception as e:
+                        print(f"AUDIO ERROR: {e}")
+
+                    # Hard-kill: bypasses atexit hooks and thread cleanup,
+                    # guaranteeing N.O.V.A. halts execution instantly.
                     os._exit(0)
+
+                if skill_router.is_session_active():
+                    response_text, session_ended = skill_router.process_turn(raw_query or query)
+                    speak(response_text)
+                    continue
 
                 handled_broadcast, broadcast_response = handle_broadcast_command(query, speak_fn=speak)
                 if handled_broadcast:

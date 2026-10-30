@@ -1,0 +1,180 @@
+{
+    "living_room_lights": {
+        "id": "living_room_lights",
+        "name": "Living Room Lights",
+        "aliases": [
+            "living room light",
+            "living room lights",
+            "lounge light",
+            "main lights",
+            "hall lights"
+        ],
+        "type": "light",
+        "room": "Living Room",
+        "power": "off",
+        "brightness": 100,
+        "color": "warm white"
+    },
+    "bedroom_light": {
+        "id": "bedroom_light",
+        "name": "Bedroom Light",
+        "aliases": [
+            "bedroom light",
+            "bedroom lights",
+            "bed light",
+            "master bedroom light"
+        ],
+        "type": "light",
+        "room": "Bedroom",
+        "power": "off",
+        "brightness": 75,
+        "color": "soft white"
+    },
+    "kitchen_light": {
+        "id": "kitchen_light",
+        "name": "Kitchen Light",
+        "aliases": [
+            "kitchen light",
+            "kitchen lights",
+            "cooking light"
+        ],
+        "type": "light",
+        "room": "Kitchen",
+        "power": "off",
+        "brightness": 100,
+        "color": "daylight"
+    },
+    "office_lamp": {
+        "id": "office_lamp",
+        "name": "Office Lamp",
+        "aliases": [
+            "office lamp",
+            "office light",
+            "desk lamp",
+            "desk light",
+            "study light"
+        ],
+        "type": "light",
+        "room": "Office",
+        "power": "off",
+        "brightness": 90,
+        "color": "cool white"
+    },
+    "coffee_maker": {
+        "id": "coffee_maker",
+        "name": "Coffee Maker",
+        "aliases": [
+            "coffee maker",
+            "coffee machine",
+            "espresso machine",
+            "coffee plug"
+        ],
+        "type": "plug",
+        "room": "Kitchen",
+        "power": "off",
+        "wattage": 0,
+        "active_wattage": 1200
+    },
+    "living_room_plug": {
+        "id": "living_room_plug",
+        "name": "Living Room Plug",
+        "aliases": [
+            "living room plug",
+            "tv plug",
+            "entertainment plug"
+        ],
+        "type": "plug",
+        "room": "Living Room",
+        "power": "off",
+        "wattage": 0,
+        "active_wattage": 250
+    },
+    "office_charger": {
+        "id": "office_charger",
+        "name": "Office Charger",
+        "aliases": [
+            "office charger",
+            "laptop charger",
+            "desk plug"
+        ],
+        "type": "plug",
+        "room": "Office",
+        "power": "on",
+        "wattage": 65,
+        "active_wattage": 65
+    },
+    "thermostat": {
+        "id": "thermostat",
+        "name": "Main Thermostat",
+        "aliases": [
+            "thermostat",
+            "main thermostat",
+            "ac",
+            "air conditioner",
+            "temperature",
+            "climate"
+        ],
+        "type": "thermostat",
+        "room": "Central",
+        "target_temperature": 22,
+        "current_temperature": 24,
+        "unit": "Celsius",
+        "mode": "cool"
+    },
+    "bedroom_ac": {
+        "id": "bedroom_ac",
+        "name": "Bedroom AC",
+        "aliases": [
+            "bedroom ac",
+            "bedroom thermostat",
+            "bedroom air conditioner"
+        ],
+        "type": "thermostat",
+        "room": "Bedroom",
+        "target_temperature": 21,
+        "current_temperature": 23,
+        "unit": "Celsius",
+        "mode": "cool"
+    },
+    "front_door": {
+        "id": "front_door",
+        "name": "Front Door Lock",
+        "aliases": [
+            "front door",
+            "front door lock",
+            "main entrance",
+            "front lock"
+        ],
+        "type": "lock",
+        "room": "Entrance",
+        "locked": true,
+        "battery": 94
+    },
+    "back_door": {
+        "id": "back_door",
+        "name": "Back Door Lock",
+        "aliases": [
+            "back door",
+            "back door lock",
+            "patio lock",
+            "patio door"
+        ],
+        "type": "lock",
+        "room": "Patio",
+        "locked": true,
+        "battery": 89
+    },
+    "garage_door": {
+        "id": "garage_door",
+        "name": "Garage Door Lock",
+        "aliases": [
+            "garage door",
+            "garage door lock",
+            "garage lock"
+        ],
+        "type": "lock",
+        "room": "Garage",
+        "locked": true,
+        "battery": 96
+    }
+}
